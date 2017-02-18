@@ -3,13 +3,13 @@
 
 #pragma semicolon 1
 #pragma unused cvarVersion
-#include <sourcemod>
+#include <sourcemod> 
 #include <sdktools>
 #include <sdkhooks>
 #undef REQUIRE_PLUGIN
 #include <updater>
 
-#define AUTOLOAD_EXTENSIONS
+#define AUTOLOAD_EXTENSIONS 
 #define REQUIRE_EXTENSIONS
 
 #pragma unused cvarVersion
@@ -27,7 +27,10 @@ new Handle:cvarIncenDeathChance = INVALID_HANDLE; //death chance if explosion
 new Handle:cvarExplosiveDeathChance = INVALID_HANDLE; //death chance if explosion
 new Handle:cvarChestStomachDeathChance = INVALID_HANDLE; //death chance if chest/stomach
 new Handle:cvar_yelling_delay = INVALID_HANDLE; //Yelling delay time
+new Handle:cvar_jammer_range = INVALID_HANDLE; //Range of jammer
+new Handle:cvar_jammer_chance = INVALID_HANDLE; //Chance jammer has to jam bomber
 new g_ClientBombs[MAXPLAYERS+1];
+new Float:g_BomberLastPos[MAXPLAYERS+1][3];
 new String:g_client_last_classstring[MAXPLAYERS+1][64];
 //new bool:bEnabled = false;
 new g_isDetonating[MAXPLAYERS+1];
@@ -43,7 +46,6 @@ leftLeg = 6
 rightLeg = 7
 Gear = 8 ?
 */
-
 
 // list of specific files that are decent
 new String:DetonateYellSounds[][] = {
@@ -84,6 +86,8 @@ public OnPluginStart()
 	cvarExplosiveDeathChance = CreateConVar("sm_suicidebomb_explosive_death_chance", "0.75", "Chance as a fraction of 1 that a bomber will explode when hurt by explosive", FCVAR_NOTIFY, true, 0.0, true, 1.0);
 	cvarChestStomachDeathChance = CreateConVar("sm_suicidebomb_chest_stomach_death_chance", "0.50", "Chance as a fraction of 1 that a bomber will explode if shot in stomach/chest", FCVAR_NOTIFY, true, 0.0, true, 1.0);
 	cvar_yelling_delay = CreateConVar("sm_yelling_delay", "6", "Yelling delay time");
+	cvar_jammer_range = CreateConVar("sm_jammer_range", "1200", "Range of the jammer");
+	cvar_jammer_chance = CreateConVar("sm_jammer_chance", "70", "Chance the jammer has to prevent trigger");
 	
 	AutoExecConfig(true,"plugin.suicide");
 	
@@ -113,6 +117,10 @@ public OnConfigsExecuted()
 public OnMapStart()
 {	
 	CreateTimer(2.5, Timer_BomberLoop, _, TIMER_REPEAT | TIMER_FLAG_NO_MAPCHANGE);
+	PrecacheSound("weapons/ied/handling/ied_trigger_ins.wav");
+	PrecacheSound("player/voip_end_transmit_beep_03.wav");
+
+	PrecacheSound("ui/sfx/beep.wav");
 	PrecacheAllahuSound();
 }
 PrecacheAllahuSound()
@@ -191,18 +199,46 @@ public Action:Timer_BomberLoop(Handle:timer) //this controls bomber loop to chec
 					//PrintToServer("[SUICIDE] Bomber Distance: %f ", tDistance);
 					
 					////PrintToServer("[SUICIDE] TIMER VICTIM DETECTED");
+					new validAntenna = -1;
+					validAntenna = FindValidProp_InDistance(bomber);
+					
 					if (tDistance < fBomberDistance)
 					{
 						new Float:fBomberViewThreshold = 0.80; // if negative, bombers back is turned
 						new tCanBomberSeeTarget = (ClientViews(bomber, victim, fBomberDistance, fBomberViewThreshold));
 						if (tCanBomberSeeTarget)
-						{
-							//new victimId = GetClientUserId(bomber);
-							//PrintToServer("[SUICIDE] IN BOMBER DISTANCE AND LOS");
-							g_isDetonating[bomber] = 1;
-							//PrintToServer("[SUICIDE] EventDeath: Victim ID is %d, g_isDetonating: %i",victimId, g_isDetonating);
-							
-							CheckExplodeHurt(bomber);
+						{	
+							PrintToServer("[SUICIDE]Valid Antenna: %d ", validAntenna);
+							if (validAntenna != -1)
+							{
+								new fRandomInt = GetRandomInt(0, 100); 
+								PrintToServer("fRandomInt: %d, CVAR %d", fRandomInt, GetConVarInt(cvar_jammer_chance));
+								if (fRandomInt < GetConVarInt(cvar_jammer_chance)) //Jam IED
+								{
+									PrintToServer("[SUICIDE] JAMMED");
+									EmitSoundToAll("weapons/ied/handling/ied_trigger_ins.wav", bomber, SNDCHAN_VOICE, _, _, 1.0);
+									EmitSoundToAll("player/voip_end_transmit_beep_03.wav", validAntenna, SNDCHAN_VOICE, _, _, 1.0);
+									EmitSoundToAll("ui/sfx/beep.wav", validAntenna, SNDCHAN_VOICE, _, _, 1.0);
+									PrintToChatAll("[Jammer] **IED Bomber Jammed**");
+									YellDetonateSound(bomber);
+								}
+								else
+								{
+									EmitSoundToAll("weapons/ied/handling/ied_trigger_ins.wav", bomber, SNDCHAN_VOICE, _, _, 1.0);
+									
+									PrintToServer("[SUICIDE] BOOM");
+									g_isDetonating[bomber] = 1;
+									CheckExplodeHurt(bomber);
+								}
+							}
+							else
+							{	
+								EmitSoundToAll("weapons/ied/handling/ied_trigger_ins.wav", bomber, SNDCHAN_VOICE, _, _, 1.0);
+									
+								PrintToServer("[SUICIDE] BOOM");
+								g_isDetonating[bomber] = 1;
+								CheckExplodeHurt(bomber);
+							}
 						}
 						else
 						{
@@ -214,6 +250,28 @@ public Action:Timer_BomberLoop(Handle:timer) //this controls bomber loop to chec
 		}
 	}
 }
+
+//Find Valid Prop
+public FindValidProp_InDistance(client)
+{
+	new prop;
+	while ((prop = FindEntityByClassname(prop, "prop_dynamic_override")) != INVALID_ENT_REFERENCE)
+	{
+		new String:propModelName[128];
+		GetEntPropString(prop, Prop_Data, "m_ModelName", propModelName, 128);
+		if (StrEqual(propModelName, "models/static_fittings/antenna02b.mdl"))
+		{
+			new Float:tDistance = (GetEntitiesDistance(client, prop));
+			if (tDistance <= (GetConVarInt(cvar_jammer_range) / 2))
+			{
+				return prop;
+			}
+		}
+
+	}
+	return -1;
+}
+
 // ----------------------------------------------------------------------------
 // ClientViews()
 // ----------------------------------------------------------------------------
@@ -386,13 +444,20 @@ public Action:Timer_DetonatePeriod(Handle:timer, any:client)
 	//ResetPack(bomberPack);
 	//client = ReadPackCell(bomberPack);
 	//bomb = ReadPackCell(bomberPack);
-	bomb = EntRefToEntIndex(g_ClientBombs[client]);
-	GetClientAbsOrigin(client, Float:clientPos);
-	clientPos[2] = clientPos[2] + 54;
-    //client is our victim and we are running through all medics to see whos nearby
-	if(IsFakeClient(client) && IsPlayerAlive(client) && bomb > 0 && bomb != INVALID_ENT_REFERENCE && IsValidEdict(bomb) && IsValidEntity(bomb))
-	{	
-		TeleportEntity(bomb, clientPos, NULL_VECTOR, NULL_VECTOR);
+	if (client > 0 && IsClientConnected(client) && IsClientInGame(client))
+	{
+		bomb = EntRefToEntIndex(g_ClientBombs[client]);
+		GetClientAbsOrigin(client, Float:clientPos);
+		clientPos[2] = clientPos[2] + 54;
+	    //client is our victim and we are running through all medics to see whos nearby
+		if(IsFakeClient(client) && IsPlayerAlive(client) && bomb > 0 && bomb != INVALID_ENT_REFERENCE && IsValidEdict(bomb) && IsValidEntity(bomb))
+		{	
+			TeleportEntity(bomb, clientPos, NULL_VECTOR, NULL_VECTOR);
+		}
+		else
+		{
+			return Plugin_Stop;
+		}
 	}
 	else
 	{
@@ -426,7 +491,7 @@ public CheckExplodeHurt(client) {
 		g_ClientBombs[client] = EntIndexToEntRef(ent);
 		//new Handle:bomberPack;
 		//CreateDataTimer(0.0 , Timer_DetonatePeriod, bomberPack, TIMER_REPEAT | TIMER_FLAG_NO_MAPCHANGE);	
-		CreateTimer(0.0, Timer_DetonatePeriod, client, TIMER_REPEAT | TIMER_FLAG_NO_MAPCHANGE);
+		CreateTimer(0.03, Timer_DetonatePeriod, client, TIMER_REPEAT | TIMER_FLAG_NO_MAPCHANGE);
         
         // WritePackCell(bomberPack, client);
         // WritePackCell(bomberPack, ent);
@@ -496,7 +561,7 @@ public CheckExplodeDeath(client) {
 	
 	//Assign random variable first
 	//new String:shotWeapName[32];
-
+	
 	new Float:vecOrigin[3],Float:vecAngles[3];
 	GetClientEyePosition(client, vecOrigin);
 
@@ -515,7 +580,7 @@ public CheckExplodeDeath(client) {
 		g_ClientBombs[client] = EntIndexToEntRef(ent);
 		//new Handle:bomberPack;
 		//CreateDataTimer(0.0 , Timer_DetonatePeriod, bomberPack, TIMER_REPEAT | TIMER_FLAG_NO_MAPCHANGE);	
-		CreateTimer(0.0, Timer_DetonatePeriod, client, TIMER_REPEAT | TIMER_FLAG_NO_MAPCHANGE);
+		CreateTimer(0.03, Timer_DetonatePeriod, client, TIMER_REPEAT | TIMER_FLAG_NO_MAPCHANGE);
         //WritePackCell(bomberPack, client);
         //WritePackCell(bomberPack, ent);
 		
@@ -580,6 +645,7 @@ public Action:YellRomaingSound(client) {
 	return Plugin_Continue;
 }
 YellDetonateSound(client) {
+	//EmitSoundToAll("weapons/ied/handling/ied_trigger_ins.wav", client, SNDCHAN_VOICE, _, _, 1.0);
 	new idx_Sound = -1;
 	idx_Sound = GetRandomInt(0, sizeof(DetonateYellSounds) - 1);
 
